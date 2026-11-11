@@ -9,7 +9,12 @@
 #pragma once
 #if defined(__linux__) && defined(__aarch64__)
 #include <stdlib.h>
-#include <sys/auxv.h>
+// Keep <sys/auxv.h> out of the shared host headers: glibc pulls in <elf.h>,
+// whose Elf64_* typedefs conflict with the loader's guest ELF declarations.
+extern unsigned long getauxval(unsigned long);
+#ifndef AT_HWCAP
+#define AT_HWCAP 16
+#endif
 #define DM_HWCAP_ATOMICS (1ul << 8)   // asm/hwcap.h HWCAP_ATOMICS (LSE, ARMv8.1)
 static inline int dm_cpu_hw_lse(void) {
     static int v = -1;   // benign race: every thread computes the same value

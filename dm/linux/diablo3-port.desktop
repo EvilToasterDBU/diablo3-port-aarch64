@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Diablo III Port
+Comment=Diablo III native ARM64 Linux launcher
+Exec=AppRun
+Icon=diablo3-port
+Terminal=false
+Categories=Game;RolePlaying;
+StartupNotify=true

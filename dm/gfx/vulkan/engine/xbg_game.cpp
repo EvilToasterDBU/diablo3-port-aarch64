@@ -1,6 +1,8 @@
-#include <android/hardware_buffer.h>
 #include <vulkan/vulkan.h>
+#if defined(__ANDROID__)
+#include <android/hardware_buffer.h>
 #include <vulkan/vulkan_android.h>
+#endif
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -1510,6 +1512,7 @@ bool lookup(uint64_t address,size_t bytes,Buffer &out){
 // GPU writes still land through the pending-writeback path. Pages the replay writes on the CPU while earlier recorded draws may
 // still read them (UpdateUniformBuffer, CPU buffer copies and clears) become "sticky" and keep the snapshot path.
 // DOOM: on by default, DM_GFX_ZEROCOPY=0 turns it off; it needs dma-buf mappings coherent with the GPU (work/zc_test).
+#if defined(__ANDROID__)
 namespace zc {
 constexpr size_t CHUNK=64u<<20;constexpr int MAX_CHUNKS=512;
 // [D3] Chunks are owned by the pool that mapped them (owner = its base) and retired at nvnMemoryPoolFinalize (pool_del ->
@@ -1645,6 +1648,21 @@ bool view(uint64_t address,uint64_t bytes,VkDeviceSize align,Buffer &out){
     out=Buffer{};out.buffer=c->buffer;out.memory=c->memory;out.offset=off;out.size=bytes;out.mapped=reinterpret_cast<void*>(address);out.coherent=true;++hits;return true;
 }
 }
+#else
+// AHardwareBuffer is an Android-only fast path. Linux uses the portable
+// snapshot buffers below until a dma-buf import path is implemented.
+namespace zc {
+int enabled=0;
+uint64_t hits=0,sticky_misses=0,align_misses=0,pending_misses=0,mapped_bytes=0,retired=0;
+int live_chunks=0;
+void map_pool(void*,size_t){}
+void unmap_pool(uintptr_t){}
+void mark(uint64_t,uint64_t){}
+uint64_t tail(uint64_t){return 0;}
+bool find(uint64_t,uint64_t){return false;}
+bool view(uint64_t,uint64_t,VkDeviceSize,Buffer&){return false;}
+}
+#endif
 bool overlaps_pending(uint64_t address,uint64_t bytes);
 bool snap_no_sync=false;bool gpu_merge_pending(uint64_t base,uint64_t bytes,const std::function<Buffer()> &alloc,Buffer &dst);   // [DOOM] GPU-indirect index range: overlapping pending results are arguments, not indices
 Buffer snapshot_slow(uint64_t address,size_t bytes,VkDeviceSize align);

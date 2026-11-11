@@ -37,7 +37,13 @@ typedef unsigned *thread_state_t;
 
 static inline mach_port_t mach_task_self(void) { return 0; }
 static inline mach_port_t mach_thread_self(void) { return (mach_port_t)gettid(); }
-static inline mach_port_t pthread_mach_thread_np(pthread_t t) { return (mach_port_t)pthread_gettid_np(t); }
+static inline mach_port_t pthread_mach_thread_np(pthread_t t) {
+#if defined(DM_LINUX)
+    (void)t; return (mach_port_t)gettid();
+#else
+    return (mach_port_t)pthread_gettid_np(t);
+#endif
+}
 static inline kern_return_t mach_port_deallocate(mach_port_t task, mach_port_t name) { (void)task; (void)name; return KERN_SUCCESS; }
 static inline kern_return_t vm_deallocate(mach_port_t task, vm_address_t a, vm_size_t n) { (void)task; (void)n; free((void *)a); return KERN_SUCCESS; }
 

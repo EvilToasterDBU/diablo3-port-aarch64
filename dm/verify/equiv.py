@@ -54,7 +54,10 @@ KEY_PAGE_OFF = hdr['KEY_PAGE_OFF']
 # trials the rewritten image's tpidr_el0 points to a fake TCB whose TCB[-1] = TSD.
 # Android rewrite blocks must not leave anything they still need below sp (a signal frame would overwrite it), so a read by the
 # rewritten image from an address below sp counts as a below-sp read, and fails on Android.
-ANDROID = hdr.get('TARGET', 0) == 1
+TARGET = hdr.get('TARGET', 0)
+ANDROID = TARGET == 1
+LINUX = TARGET == 3
+NOREDZONE = ANDROID or LINUX
 SLOTW = {(TSD + 8 * k, 8) for k in KEY_SLOT.values()}
 TCB = TSD + 0x8000
 pat = bytearray(open(f'{DIR}/{MOD}.patched.bin', 'rb').read())
@@ -135,7 +138,8 @@ def plain_block(a):
         if ins[2].operands[0].reg != ins[1].operands[0].reg or ins[2].operands[1].mem.disp != -8: return None
         ins = ins[:2] + ins[3:]
         return plain_tail(ins)
-    if len(ins) < 8 or ins[1].mnemonic != 'mrs' or 'tpidrro_el0' not in ins[1].op_str:
+    tp_reg = 'tpidr_el0' if LINUX else 'tpidrro_el0'
+    if len(ins) < 8 or ins[1].mnemonic != 'mrs' or tp_reg not in ins[1].op_str:
         return None
     return plain_tail(ins)
 def plain_tail(ins):
@@ -246,6 +250,7 @@ def run(u, st, start, patched, init):
         u.mem_write(TSD + 8 * SLOTTLR, struct.pack('<Q', init['tlr']))
         u.reg_write(GP[18], 0xDEADBEEFDEADBEEF)
         if ANDROID: u.reg_write(UC_ARM64_REG_TPIDR_EL0, TCB); u.mem_write(TCB - 8, struct.pack('<Q', TSD))
+        elif LINUX: u.reg_write(UC_ARM64_REG_TPIDR_EL0, TSD)
     end = {'pc': None}
     if patched:
         seen = {'patch': False}
@@ -368,8 +373,8 @@ if __name__ == '__main__':
     below = [r for r in res if r[4]]
     for a, n, eff, d, bel in below[:20]:
         i = ins_of(a); print(f'BELOWSP {a:#x} {i.mnemonic} {i.op_str} reads={bel} trials={n}')
-    ok = not bad and not zero and not miss and not (ANDROID and below)   # 变异漏抓 = 判据分不出坏改写，判红（早先漏抓只打印不判） | A missed mutation = the criterion cannot tell a bad rewrite apart, so fail (earlier a miss was only printed, not judged)
+    ok = not bad and not zero and not miss and not (NOREDZONE and below)   # 变异漏抓 = 判据分不出坏改写，判红（早先漏抓只打印不判） | A missed mutation = the criterion cannot tell a bad rewrite apart, so fail (earlier a miss was only printed, not judged)
     print(f'EQUIV {MOD} {"OK" if ok else "FAIL"} 站点={len(res)} 试验={T} 有效试验={E} 双异常={T - E} '
           f'有效≥1站点={len(res) - len(zero)} 有效≥{A.min_eff}站点={len(res) - len(low)} 零有效={len(zero)} 分歧站点={len(bad)} '
-          f'窗口={len(winend)} 其中含条件分支={len(win_br)}（{sum(len(v) for v in win_br.values())} 条×2 向强制） 门站点(结构核对)={ngate} 已登记剪口(结构核对)={ncut} 观测门(结构核对)={nobs} 变异={len(mut_sites)}（{mut_by}） 抓到={caught} 漏抓={miss} 低于sp读站点={len(below)}{"（安卓判红）" if ANDROID and below else ""} 目标={"安卓" if ANDROID else "苹果"} seed={A.seed}', flush=True)
+          f'窗口={len(winend)} 其中含条件分支={len(win_br)}（{sum(len(v) for v in win_br.values())} 条×2 向强制） 门站点(结构核对)={ngate} 已登记剪口(结构核对)={ncut} 观测门(结构核对)={nobs} 变异={len(mut_sites)}（{mut_by}） 抓到={caught} 漏抓={miss} 低于sp读站点={len(below)}{"（无红区判红）" if NOREDZONE and below else ""} 目标={"安卓" if ANDROID else "Linux" if LINUX else "苹果"} seed={A.seed}', flush=True)
     sys.exit(0 if ok else 1)

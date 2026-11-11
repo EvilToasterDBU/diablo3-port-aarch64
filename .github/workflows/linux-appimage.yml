@@ -1,0 +1,53 @@
+name: Linux ARM64 AppImage
+
+on:
+  push:
+    tags:
+      - "armada-linux-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to update
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Native ARM64 avoids cross-compilation and produces an aarch64 AppImage.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libsdl2-dev libvulkan-dev libfreetype-dev \
+            pkg-config curl squashfs-tools python3
+
+      - name: Create data-free CI inputs
+        run: python3 dm/linux/ci_stubs.py "$RUNNER_TEMP/dm-generated"
+
+      - name: Build ARM64 AppImage
+        env:
+          DM_ROOT: ${{ runner.temp }}/diablo3-port-build
+          DM_GEN_DIR: ${{ runner.temp }}/dm-generated
+          DM_BUNDLE_RUNTIME: "0"
+          DM_JOBS: "4"
+        run: sh dm/linux/build_appimage.sh "$RUNNER_TEMP/diablo3-port-aarch64.AppImage"
+
+      - name: Publish stable release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          gh release upload "$tag" "$RUNNER_TEMP/diablo3-port-aarch64.AppImage" --clobber
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F prerelease=false

@@ -99,6 +99,7 @@ HLE_FORCE("_ZNK2nn7friends7Profile18GetProfileImageUrlEPNS0_3UrlENS0_9ImageSizeE
 
 // ---- crypto: the csrng service -> host getrandom(2). Hashing / AES in nn::crypto are pure code and run as-is.
 #include <sys/random.h>
+#include <errno.h>
 HLE_FORCE("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", "csrng service -> getrandom(2)", void, h_crypto_Rand, void *buf, size_t n) {
     uint8_t *p = buf;
     while (n) { ssize_t r = getrandom(p, n, 0); if (r < 0) { if (errno == EINTR) continue; die("getrandom: %s", strerror(errno)); } p += r; n -= (size_t)r; }

@@ -4,12 +4,12 @@
   setup                     (no file arguments, e.g. a double-click on setup.bat)
       Looks for the base game, the update v1441792, optional language-pack DLC and prod.keys in put-game-files-here/ (next to
       the setup scripts) and in the current directory, under any file names, and prepares everything.
-  setup FILE_OR_FOLDER... [--work DIR] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-shaders] [--skip-verify]
+  setup FILE_OR_FOLDER... [--work DIR] [--target android|linux] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-shaders] [--skip-verify]
         [--steps exefs,patch,verify,romfs,shaders,dlc]
       The same with explicit files (or folders to search), in any order. Packages: NSP, NSZ, XCI, XCZ, also split dumps
       (a folder of 00, 01, ... parts, or name.xc0 / name.ns0 with .xc1 ... next to it); one package may hold several titles.
       Base, update and DLC are told apart by the title id in their content meta (CNMT), not by the name.
-      Then: ExeFS of the update -> offline patch (dm/tools/patch_nso.py, DM_TARGET=android) -> per-site equivalence check of the
+      Then: ExeFS of the update -> offline patch (dm/tools/patch_nso.py, target selected with --target) -> per-site equivalence check of the
       patch (dm/verify/equiv.py) -> RomFS (base + BKTR update) -> shader extraction from the CPK archives and offline translation
       to Vulkan (the steps of tools/d3_shaders_vk.sh) -> language-pack DLC RomFS -> the phone folder
       <work>/Diablo3Mobile/{romfs, aoc/<index>, dm/out, dm/shaders}. Every step is skipped when its output is already complete;
@@ -65,7 +65,7 @@ LANG_NAMES = {1: 'English (UK)', 10: 'Russian'}
 STAGES = [('Finding and checking your game files', 'a few seconds'),
           ('Checking the tools and the free space', 'seconds; the first time also the .NET download'),
           ('Extracting the game program (ExeFS)', 'under a minute'),
-          ('Patching the program for Android', 'under a minute'),
+          ('Patching the program for the selected platform', 'under a minute'),
           ('Checking the patch (per-site equivalence)', '1-5 min'),
           ('Extracting the game data (RomFS, ~16 GiB)', '15-45 min, longest with NSZ / XCZ'),
           ('Translating the shaders', '2-10 min; the first run also downloads build packages from NuGet'),
@@ -155,11 +155,13 @@ def sha256_file(p):
 
 
 class Layout:
-    def __init__(self, work):
+    def __init__(self, work, target='android'):
         self.work = Path(work).resolve()
+        self.target = target
         self.phone = self.work / DATA_NAME
         self.romfs, self.aoc = self.phone / 'romfs', self.phone / 'aoc'
-        self.out, self.shaders = self.phone / 'dm' / 'out', self.phone / 'dm' / 'shaders'
+        self.out = self.phone / 'dm' / ('out' if target == 'android' else f'out-{target}')
+        self.shaders = self.phone / 'dm' / 'shaders'
         self.exefs, self.nsp = self.work / 'exefs-update', self.work / 'nsp'
         self.shd, self.jobs = self.work / 'cpk-shaders', self.work / 'shaders-jobs'
         self.xlate = self.work / 'build' / 'dmsh_xlate_d3'
@@ -196,6 +198,15 @@ class Layout:
 
     def shaders_ok(self):
         return (self.shaders / '_vk_build.json').is_file() and self.shader_count() > 0
+
+    def shader_jobs_ok(self):
+        """A jobs.tsv left by an interrupted split is not a complete shader cache."""
+        try:
+            rows = (self.jobs / 'jobs.tsv').read_text(encoding='utf-8').splitlines()[1:]
+            return bool(rows) and all((self.jobs / 'rec' / (row.split('\t', 1)[0] + '.rec')).is_file()
+                                      for row in rows if row.strip())
+        except (OSError, UnicodeError, IndexError):
+            return False
 
     def aoc_done(self):
         """{index: file count} of the language packs extracted completely."""
@@ -478,12 +489,12 @@ def step_exefs(L, upd, keys):
                    f'{BUILD_ID} / {SDK_BUILD_ID} (Diablo III update v{UPDATE_VERSION})')
 
 
-def step_patch(L):
+def step_patch(L, target):
     if L.out_ok(): print('  already done'); return
     L.out.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, DM_TARGET='android', PYTHONUTF8='1')
+    env = dict(os.environ, DM_TARGET=target, PYTHONUTF8='1')
     for m in ('main', 'sdk'):
-        print(f'  patching {m} (dm/tools/patch_nso.py, DM_TARGET=android)', flush=True)
+        print(f'  patching {m} (dm/tools/patch_nso.py, DM_TARGET={target})', flush=True)
         run([sys.executable, ROOT / 'dm' / 'tools' / 'patch_nso.py', L.exefs / m, L.out, m], env=env)
     if not L.out_ok(): raise Fail('patch_nso.py finished without its outputs')
 
@@ -623,7 +634,7 @@ def install_dotnet(yes):
     return str(DOTNET_DIR / DOTNET_EXE)
 
 
-def step_shaders(L, dn):
+def step_shaders_unlocked(L, dn):
     """The steps of tools/d3_shaders_vk.sh: .shd from the merged CPK view -> jobs -> translator build -> SPIR-V bundles."""
     if L.shaders_ok(): print(f'  already done ({L.shader_count()} shader bundles)'); return
     env = dotnet_env(dn, dict(os.environ, PYTHONUTF8='1'))
@@ -636,8 +647,9 @@ def step_shaders(L, dn):
         print('  reading the shaders from the CPK archives (tools/d3_cpk.py mextract ... *.shd)', flush=True)
         if L.shd.exists(): shutil.rmtree(L.shd)
         run([sys.executable, TOOLS / 'd3_cpk.py', 'mextract', L.romfs, L.shd, '*.shd'], env=env)
-    if not (L.jobs / 'jobs.tsv').is_file():
+    if not L.shader_jobs_ok():
         print('  splitting them into translator jobs (tools/d3_shader_jobs.py)', flush=True)
+        if L.jobs.exists(): shutil.rmtree(L.jobs)
         run([sys.executable, TOOLS / 'd3_shader_jobs.py', L.shd, L.jobs], env=env)
     exe = L.xlate / 'bin' / ('dmsh_xlate.exe' if WIN else 'dmsh_xlate')
     print('  building the shader translator (tools/build_dmsh_xlate_d3.py; needs internet the first time)', flush=True)
@@ -647,6 +659,27 @@ def step_shaders(L, dn):
     L.shaders.mkdir(parents=True, exist_ok=True)
     run([sys.executable, ROOT / 'dm' / 'gfx' / 'tools' / 'dmsh_vk_xc2.py', L.jobs, L.shaders], env=dict(env, XLATE=str(exe)))
     print(f'  {L.shader_count()} shader bundles')
+
+
+def step_shaders(L, dn):
+    """Serialize the shared extraction/jobs/translation cache across setup invocations."""
+    lock_path = L.work / '.d3-shaders.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, 'a+b') as lock:
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0)
+            if not lock.read(1): lock.write(b'0'); lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try: step_shaders_unlocked(L, dn)
+            finally:
+                lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try: step_shaders_unlocked(L, dn)
+            finally: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def step_dlc(L, dlc, keys, keep_nsp):
@@ -771,6 +804,17 @@ def push(L, serial):
 def next_steps(L, offer_push, yes):
     size = folder_bytes(L.phone)
     print(f'\n== Done. The game folder is ready: {L.phone} ({gb(size)})')
+    if L.target == 'linux':
+        print(f'''\nLinux ARM64 next steps:
+  1. Build the native executable/AppImage from dm/linux (see dm/linux/README.md).
+  2. Copy the private game folder to the Retroid over SSH (about {gb(size)}):
+       rsync -a --info=progress2 "{L.phone}/" armada@192.168.1.48:~/dm-work/Diablo3Mobile/
+  3. Put the AppImage in ~/Games and launch it on ArmadaOS:
+       ssh armada@192.168.1.48 'mkdir -p ~/Games'
+       scp work/build/linux/dist/diablo3-port-aarch64.AppImage armada@192.168.1.48:Games/
+       ssh armada@192.168.1.48 'chmod +x ~/Games/diablo3-port-aarch64.AppImage && ~/Games/diablo3-port-aarch64.AppImage'
+     Game files, generated modules and shaders stay in ~/dm-work/Diablo3Mobile.''')
+        return
     adb = adb_exe() if offer_push else None
     if adb:
         ready = [s for s, st in adb_devices(adb) if st == 'device']
@@ -917,7 +961,7 @@ def prepare(a, L):
     if 'exefs' in steps: step_exefs(L, upd, kf); print(f'  done in {took(t0)}')
     else: print('  skipped (--steps)')
     t0 = stage(4)
-    if 'patch' in steps: step_patch(L); print(f'  done in {took(t0)}')
+    if 'patch' in steps: step_patch(L, L.target); print(f'  done in {took(t0)}')
     else: print('  skipped (--steps)')
     t0 = stage(5)
     if verify and L.out_ok(): step_verify(L); print(f'  done in {took(t0)}')
@@ -941,6 +985,7 @@ def prepare(a, L):
     if not L.complete():
         say(f'finished the requested steps; the folder is not complete yet: {L.phone}'); return 0
     if a.push:
+        if L.target != 'android': raise Fail('--push requires --target android; copy the Linux runtime over SSH/SCP')
         push(L, None if a.push == 'auto' else a.push); return 0
     next_steps(L, False, a.yes)
     return 0
@@ -956,15 +1001,19 @@ def main(argv=None):
         if argv[0] == 'push': ap.add_argument('serial', nargs='?')
         else: ap.add_argument('files', nargs='*')
         ap.add_argument('--work', default=default_work)
+        ap.add_argument('--target', choices=('android', 'linux'), default='android')
         ap.add_argument('--yes', '-y', action='store_true')
         a = ap.parse_args(argv[1:])
-        L = Layout(a.work)
+        L = Layout(a.work, a.target)
+        if argv[0] == 'push' and a.target != 'android': raise Fail('adb push is only available for the Android target')
         if argv[0] == 'check': return check(L, a.files)
         push(L, a.serial); return 0
     ap = argparse.ArgumentParser(prog='setup', description='Prepare Diablo III Mobile game files from your own dumps.')
     ap.add_argument('files', nargs='*', help=f'base game, update v{UPDATE_VERSION}, optional language-pack DLC and prod.keys in any '
                                              'order (or folders to search); none: put-game-files-here/ and the current folder')
     ap.add_argument('--work', default=default_work)
+    ap.add_argument('--target', choices=('android', 'linux'), default='android',
+                    help='rewrite guest modules for Android/Bionic (default) or Linux/glibc')
     ap.add_argument('--push', metavar='SERIAL', nargs='?', const='auto')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--yes', '-y', action='store_true')
@@ -974,7 +1023,7 @@ def main(argv=None):
     ap.add_argument('--no-dlc', action='store_true', help='ignore all DLC (language and item packs): the game runs in English')
     ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,dlc', help='comma list of steps to run (default: all)')
     a = ap.parse_args(argv)
-    L = Layout(a.work)
+    L = Layout(a.work, a.target)
     start_log(Path(a.work))
     print('Diablo III Mobile setup: prepares the game folder for the phone from your own Diablo III (Switch) dumps.')
     return prepare(a, L)

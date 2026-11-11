@@ -32,6 +32,15 @@ static dm_sem sem_new(void) { dm_sem s = malloc(sizeof *s); if (!s || sem_init(s
 static void sem_up(dm_sem s) { sem_post(s); }
 static void sem_down(dm_sem s) { while (sem_wait(s)) {} }
 static void sem_free(dm_sem s) { sem_destroy(s); free(s); }
+#elif defined(DM_LINUX)
+#include <SDL.h>
+#include <semaphore.h>
+typedef SDL_AudioDeviceID dm_audev;
+typedef sem_t *dm_sem;
+static dm_sem sem_new(void) { dm_sem s = malloc(sizeof *s); if (!s || sem_init(s, 0, 0)) die("audio semaphore"); return s; }
+static void sem_up(dm_sem s) { sem_post(s); }
+static void sem_down(dm_sem s) { while (sem_wait(s)) {} }
+static void sem_free(dm_sem s) { sem_destroy(s); free(s); }
 #else
 #include <aaudio/AAudio.h>
 #include <semaphore.h>
@@ -311,6 +320,24 @@ static int au_open(aout *a) {   // 0 = 声卡开好了；-1 = 开不了（a->au 
 static int dev_start(aout *a) { return OH_AudioRenderer_Start(a->au) == AUDIOSTREAM_SUCCESS ? 0 : -1; }
 static void dev_stop(aout *a) { OH_AudioRenderer_Stop(a->au); }
 static void dev_close(aout *a) { OH_AudioRenderer_Release(a->au); a->au = NULL; }
+#elif defined(DM_LINUX)
+// SDL2 audio follows the active Linux output backend (PipeWire/PulseAudio/ALSA).
+static void sdl_audio(void *ctx, Uint8 *data, int bytes) { render(ctx, data, (uint32_t)bytes); }
+static int au_open(aout *a) {
+    a->mix = a->ch == 6;
+    if (a->mix && !a->mixbuf) a->mixbuf = malloc(MIXMAX * 12);
+    if (a->mix && !a->mixbuf) return -1;
+    SDL_AudioSpec want = {0}, got = {0};
+    want.freq = RATE; want.format = AUDIO_S16SYS; want.channels = (Uint8)(a->mix ? 2 : a->ch);
+    want.samples = 1024; want.callback = sdl_audio; want.userdata = a;
+    a->au = SDL_OpenAudioDevice(NULL, 0, &want, &got, 0);
+    if (!a->au) { LOG("SDL audio open failed: %s; using timed silent sink", SDL_GetError()); return -1; }
+    LOG("SDL audio: %d Hz %u channels", got.freq, got.channels);
+    return 0;
+}
+static int dev_start(aout *a) { SDL_PauseAudioDevice(a->au, 0); return 0; }
+static void dev_stop(aout *a) { SDL_PauseAudioDevice(a->au, 1); }
+static void dev_close(aout *a) { SDL_CloseAudioDevice(a->au); a->au = 0; }
 #else
 // 安卓：AAudio 低延迟输出流（16 位、48 kHz、游戏用途），回调直接调 render。
 // 流断开（耳机插拔、蓝牙切换、系统音频服务重启）时 AAudio 在错误回调里通知：回调里不能关流，交给一条普通线程关掉重开，原来在播就接着播。
